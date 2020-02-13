@@ -173,7 +173,7 @@ object ExpandConnects extends Pass {
        case (m: Module) => expand_connects(m)
     }
     Circuit(c.info, modulesx, c.main)
-  }
+    }
 }
 
 

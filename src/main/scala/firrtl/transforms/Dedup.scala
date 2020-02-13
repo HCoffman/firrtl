@@ -85,6 +85,9 @@ class DedupModules extends Transform {
       }
     )
 
+    logger.info("Renames:")
+    logger.info(renameMap.serialize)
+
     (InferTypes.run(c.copy(modules = dedupedModules)), renameMap)
   }
 }

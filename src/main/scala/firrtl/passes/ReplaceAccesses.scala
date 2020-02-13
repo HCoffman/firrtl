@@ -17,7 +17,7 @@ object ReplaceAccesses extends Pass {
       case WSubAccess(ex, UIntLiteral(value, width), t, g) => WSubIndex(onExp(ex), value.toInt, t, g)
       case _ => e map onExp
     }
-  
+
     c copy (modules = c.modules map (_ map onStmt))
   }
 }

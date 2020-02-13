@@ -5,6 +5,7 @@ package firrtlTests.stage.phases
 import org.scalatest.{FlatSpec, Matchers}
 
 import firrtl.{Compiler => _, _}
+import firrtl.annotations.DeletedAnnotation
 import firrtl.options.Phase
 import firrtl.stage.{CompilerAnnotation, FirrtlCircuitAnnotation, RunFirrtlTransformAnnotation}
 import firrtl.stage.phases.Compiler
@@ -40,7 +41,10 @@ class CompilerSpec extends FlatSpec with Matchers {
 
     val expected = Seq(FirrtlCircuitAnnotation(circuitOut))
 
-    phase.transform(input).toSeq should be (expected)
+    phase.transform(input).toSeq.filter{
+      case _: DeletedAnnotation => false
+      case _ => true
+    } should be (expected)
   }
 
   it should "compile multiple FirrtlCircuitAnnotations" in new Fixture {

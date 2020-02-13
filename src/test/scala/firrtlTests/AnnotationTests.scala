@@ -66,7 +66,9 @@ abstract class AnnotationTests extends AnnotationSpec with Matchers {
     val transform = new DeletingTransform
     val tname = transform.name
     val inlineAnn = InlineAnnotation(CircuitName("Top"))
-    val result = compiler.compile(CircuitState(parse(input), ChirrtlForm, Seq(inlineAnn)), Seq(transform))
+    val result = _root_.logger.Logger.makeScope(Seq(_root_.logger.LogLevelAnnotation(_root_.logger.LogLevel.Trace))){
+      compiler.compile(CircuitState(parse(input), ChirrtlForm, Seq(inlineAnn)), Seq(transform))
+    }
     result.annotations.head should matchPattern {
       case DeletedAnnotation(`tname`, `inlineAnn`) =>
     }

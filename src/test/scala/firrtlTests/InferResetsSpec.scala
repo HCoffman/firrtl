@@ -4,16 +4,32 @@ package firrtlTests
 
 import firrtl._
 import firrtl.ir._
+import firrtl.annotations.CircuitTarget
 import firrtl.passes.{CheckHighForm, CheckTypes, CheckInitialization}
-import firrtl.transforms.InferResets
+import firrtl.transforms.{DontTouchAnnotation, InferResets}
 import FirrtlCheckers._
 
 // TODO
 // - Test nodes in the connection
 // - Test with whens (is this allowed?)
 class InferResetsSpec extends FirrtlFlatSpec {
-  def compile(input: String, compiler: Compiler = new MiddleFirrtlCompiler): CircuitState =
-    compiler.compileAndEmit(CircuitState(parse(input), ChirrtlForm), List.empty)
+  import _root_.logger.{ClassLogLevelAnnotation, Logger, LogLevel, LogLevelAnnotation}
+
+  def compile(input: String, compiler: Compiler = new MiddleFirrtlCompiler, annotations: AnnotationSeq = Seq.empty): CircuitState = {
+    val gll = LogLevelAnnotation(LogLevel.None)
+    val cll = Seq(
+      ClassLogLevelAnnotation("firrtl.passes.ReplaceAccesses$", gll.globalLogLevel),
+      ClassLogLevelAnnotation("firrtl.passes.ExpandConnects$",  gll.globalLogLevel),
+      ClassLogLevelAnnotation("firrtl.transforms.InferResets",  LogLevel.Trace),
+      ClassLogLevelAnnotation("firrtl.annotations.transforms.EliminateTargetPaths",  LogLevel.Trace),
+      ClassLogLevelAnnotation("firrtl.passes.ExpandWhens$",     gll.globalLogLevel),
+      ClassLogLevelAnnotation("firrtl.passes.InferTypes$",      gll.globalLogLevel),
+      ClassLogLevelAnnotation("firrtl.ResolveAndCheck",         gll.globalLogLevel)
+    )
+    Logger.makeScope(gll +: cll) {
+      compiler.compileAndEmit(CircuitState(parse(input), ChirrtlForm, annotations), List.empty)
+    }
+  }
 
   behavior of "ResetType"
 
@@ -189,8 +205,8 @@ class InferResetsSpec extends FirrtlFlatSpec {
   }
 
   it should "not allow different Reset Types to drive a single Reset" in {
-    an [InferResets.DifferingDriverTypesException] shouldBe thrownBy {
-      val result = compile(s"""
+    val passExceptions = the [passes.PassExceptions] thrownBy {
+      compile(s"""
         |circuit top :
         |  module top :
         |    input reset0 : AsyncReset
@@ -207,6 +223,8 @@ class InferResetsSpec extends FirrtlFlatSpec {
         |""".stripMargin
       )
     }
+    passExceptions.exceptions should contain (_: CheckTypes.MuxSameType)
+    passExceptions.exceptions should contain (_: CheckTypes.InvalidRegInit)
   }
 
   it should "allow concrete reset types to overrule invalidation" in {
@@ -369,46 +387,115 @@ class InferResetsSpec extends FirrtlFlatSpec {
     }
   }
 
-
   it should "support inferring modules that would dedup differently" in {
-    val result = compile(s"""
-      |circuit top :
-      |  module child :
-      |    input clock : Clock
-      |    input childReset : Reset
-      |    input x : UInt<8>
-      |    output z : UInt<8>
-      |    reg r : UInt<8>, clock with : (reset => (childReset, UInt(123)))
-      |    r <= x
-      |    z <= r
-      |  module child_1 :
-      |    input clock : Clock
-      |    input childReset : Reset
-      |    input x : UInt<8>
-      |    output z : UInt<8>
-      |    reg r : UInt<8>, clock with : (reset => (childReset, UInt(123)))
-      |    r <= x
-      |    z <= r
-      |  module top :
-      |    input clock : Clock
-      |    input reset1 : UInt<1>
-      |    input reset2 : AsyncReset
-      |    input x : UInt<8>[2]
-      |    output z : UInt<8>[2]
-      |    inst c of child
-      |    c.clock <= clock
-      |    c.childReset <= reset1
-      |    c.x <= x[0]
-      |    z[0] <= c.z
-      |    inst c2 of child_1
-      |    c2.clock <= clock
-      |    c2.childReset <= reset2
-      |    c2.x <= x[1]
-      |    z[1] <= c2.z
-      |""".stripMargin
+    // val input =
+    //   """|circuit top:
+    //      |  module child:
+    //      |    input childReset: Reset
+    //      |    node r = UInt<1>(0)
+    //      |  module top:
+    //      |    input reset1: UInt<1>
+    //      |    input reset2: AsyncReset
+    //      |    inst c1 of child
+    //      |    c1.childReset <= reset1
+    //      |    inst c2 of child
+    //      |    c2.childReset <= reset2
+    //      |""".stripMargin
+
+    val input = """|circuit Foo:
+                   |  module Bar:
+                   |    input reset: Reset
+                   |    node x = UInt<1>(0)
+                   |    skip
+                   |  module Foo:
+                   |    inst bar of Bar
+                   |""".stripMargin
+
+    val inputState = CircuitState(
+      Parser.parse(input),
+      ChirrtlForm,
+      Seq(
+        DontTouchAnnotation(CircuitTarget("Foo").module("Bar").ref("x"))
+      )
     )
-    result should containTree { case Port(_, "childReset", Input, BoolType) => true }
-    result should containTree { case Port(_, "childReset", Input, AsyncResetType) => true }
+
+    val outputState = Logger.makeScope(
+      Seq(
+        ClassLogLevelAnnotation("firrtl.transforms.DedupModules", LogLevel.Info),
+        ClassLogLevelAnnotation("firrtl.annotations.transforms.EliminateTargetPaths",  LogLevel.Info),
+        ClassLogLevelAnnotation("firrtl.transforms.InferResets", LogLevel.Info))){
+      Seq(
+        new IRToWorkingIR,
+        new ResolveAndCheck,
+        new InferResets,
+        new firrtl.transforms.DedupModules).foldLeft(inputState){ case (a, b) => b.runTransform(a) }
+    }
+
+    outputState.annotations.foreach(a => info(a.serialize))
+    info(outputState.circuit.serialize)
+
+    val dontTouches = outputState.annotations.collect{ case a: DontTouchAnnotation => a }
+
+    dontTouches.zip(Seq(DontTouchAnnotation(CircuitTarget("Foo").module("Bar___Foo_bar").ref("x")))).foreach{
+      case (a, b) =>
+        val Seq(aa, bb) = Seq(a, b)
+        info(s"${aa.target.serialize} == ${bb.target.serialize}")
+        aa should be (bb)
+    }
+
+    // val result = compile(inputState,
+    //                      compiler = new VerilogCompiler,
+    //                      annotations = Seq(DontTouchAnnotation(CircuitTarget("top").module("child").ref("r")))
+    // )
+    // result should containTree { case Port(_, "childReset", Input, BoolType) => true }
+    // result should containTree { case Port(_, "childReset", Input, AsyncResetType) => true }
+  }
+
+  it should "deal with modules that are fully removed" in {
+    import firrtl.EmittedCircuitAnnotation
+    import firrtl.stage.{FirrtlStage, FirrtlSourceAnnotation}
+    val input =
+      """|circuit Foo:
+         |  module Baz:
+         |    input clk: Clock
+         |    input rst: Reset
+         |    input a: UInt<1>
+         |    output b: UInt<1>
+         |    reg a_d: UInt<1>, clk with: (reset => (rst, UInt<1>(0)))
+         |    a_d <= a
+         |    b <= a_d
+         |
+         |  module Bar:
+         |    input clk: Clock
+         |    input rst: Reset
+         |    input a: UInt<1>
+         |    output b: UInt<1>
+         |    reg a_d: UInt<1>, clk with: (reset => (rst, UInt<1>(0)))
+         |    inst baz of Baz
+         |    baz.clk <= clk
+         |    baz.rst <= rst
+         |    baz.a <= a
+         |    a_d <= baz.b
+         |    b <= a_d
+         |
+         |  module Foo:
+         |    input clk: Clock
+         |    input rst: UInt<1>
+         |    input a: UInt<1>
+         |    output b: UInt<1>
+         |    inst bar of Bar
+         |
+         |    bar.clk <= clk
+         |    bar.rst <= rst
+         |    bar.a <= a
+         |    b <= bar.b""".stripMargin
+
+    (new FirrtlStage)
+      .execute(Array("-X", "mverilog"), Seq(FirrtlSourceAnnotation(input)))
+      .foreach{
+        case a: EmittedCircuitAnnotation[_] => println(a.value)
+        case _ =>
+      }
+
   }
 }
-
